@@ -8,7 +8,63 @@ import subprocess
 import sys
 import argparse
 import re
+import os
+import threading
+import time
 from typing import Dict, List, Any, Optional, Tuple
+
+# ANSI color codes
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    
+    # Text colors
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+    
+    # Bright colors
+    BRIGHT_RED = '\033[91m'
+    BRIGHT_GREEN = '\033[92m'
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_BLUE = '\033[94m'
+    BRIGHT_MAGENTA = '\033[95m'
+    BRIGHT_CYAN = '\033[96m'
+
+# Emojis
+class Emoji:
+    CHECK = '✓'
+    CROSS = '✗'
+    WARNING = '⚠'
+    INFO = 'ℹ'
+    ROCKET = '🚀'
+    WRENCH = '🔧'
+    CLIPBOARD = '📋'
+    MAG = '🔍'
+    BUG = '🐛'
+    LIGHTBULB = '💡'
+    ARROW = '→'
+    STAR = '⭐'
+
+# Disable colors if output is not a terminal or NO_COLOR env var is set
+def should_colorize():
+    return os.getenv('NO_COLOR') is None and sys.stdout.isatty()
+
+def colorize(text: str, color: str) -> str:
+    """Apply color to text if colorization is enabled."""
+    if should_colorize():
+        return f"{color}{text}{Colors.RESET}"
+    return text
+
+def bold(text: str) -> str:
+    """Make text bold."""
+    return colorize(text, Colors.BOLD)
 
 
 def run_k8sgpt(k8sgpt_args: List[str], need_json: bool = False) -> Tuple[subprocess.CompletedProcess, Optional[Dict[str, Any]]]:
@@ -18,8 +74,8 @@ def run_k8sgpt(k8sgpt_args: List[str], need_json: bool = False) -> Tuple[subproc
         cmd = ["k8sgpt"] + k8sgpt_args
         
         # If we need JSON output, add --output json if not present
+        has_output_flag = False
         if need_json:
-            has_output_flag = False
             for arg in k8sgpt_args:
                 if arg in ["--output", "-o"]:
                     has_output_flag = True
@@ -28,27 +84,162 @@ def run_k8sgpt(k8sgpt_args: List[str], need_json: bool = False) -> Tuple[subproc
             if not has_output_flag:
                 cmd.extend(["--output", "json"])
         
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False
-        )
-        
-        # If command failed and we added --output json, try without it (in case it's not supported)
-        if result.returncode != 0 and need_json and not has_output_flag:
-            cmd_no_output = ["k8sgpt"] + k8sgpt_args
+        # If we need JSON, stream output live but also capture it
+        if need_json:
+            # Use Popen to stream output live while capturing it
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,  # Line buffered
+                universal_newlines=True
+            )
+            
+            # Stream output live and capture it
+            stdout_chunks = []
+            stderr_chunks = []
+            
+            def read_stdout():
+                """Read from stdout in small chunks to preserve progress bars."""
+                try:
+                    json_started = False
+                    while True:
+                        # Read in small chunks to preserve \r for progress bars
+                        chunk = process.stdout.read(1024)
+                        if not chunk:
+                            break
+                        stdout_chunks.append(chunk)  # Always capture for parsing
+                        
+                        # Check if JSON has started (look for opening brace)
+                        if not json_started:
+                            # Check if this chunk contains the start of JSON
+                            if '{' in chunk:
+                                # Find where JSON starts
+                                json_idx = chunk.find('{')
+                                # Print everything before JSON
+                                if json_idx > 0:
+                                    sys.stdout.write(chunk[:json_idx])
+                                    sys.stdout.flush()
+                                # Don't print the JSON part
+                                json_started = True
+                            else:
+                                # No JSON yet, print everything
+                                sys.stdout.write(chunk)
+                                sys.stdout.flush()
+                        # If JSON has started, don't print it (but it's already in stdout_chunks for parsing)
+                except (ValueError, OSError):
+                    pass  # Stream closed
+            
+            def read_stderr():
+                """Read from stderr in small chunks."""
+                try:
+                    while True:
+                        chunk = process.stderr.read(1024)
+                        if not chunk:
+                            break
+                        stderr_chunks.append(chunk)
+                        # Print stderr immediately
+                        sys.stderr.write(chunk)
+                        sys.stderr.flush()
+                except (ValueError, OSError):
+                    pass  # Stream closed
+            
+            # Start threads to read both streams concurrently
+            stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            
+            stdout_thread.start()
+            stderr_thread.start()
+            
+            # Wait for process to complete
+            returncode = process.wait()
+            
+            # Wait for threads to finish reading
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
+            
+            # Use captured chunks (which may have JSON filtered out in display)
+            stdout = ''.join(stdout_chunks)
+            stderr = ''.join(stderr_chunks)
+            
+            # Create a CompletedProcess-like result
+            result = subprocess.CompletedProcess(
+                cmd, returncode, stdout, stderr
+            )
+            
+            # If command failed and we added --output json, try without it (in case it's not supported)
+            if returncode != 0 and not has_output_flag:
+                # Retry without --output json
+                cmd_no_output = ["k8sgpt"] + k8sgpt_args
+                process = subprocess.Popen(
+                    cmd_no_output,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
+                )
+                
+                stdout_chunks = []
+                stderr_chunks = []
+                
+                def read_stdout_retry():
+                    try:
+                        while True:
+                            chunk = process.stdout.read(1024)
+                            if not chunk:
+                                break
+                            stdout_chunks.append(chunk)
+                            sys.stdout.write(chunk)
+                            sys.stdout.flush()
+                    except (ValueError, OSError):
+                        pass
+                
+                def read_stderr_retry():
+                    try:
+                        while True:
+                            chunk = process.stderr.read(1024)
+                            if not chunk:
+                                break
+                            stderr_chunks.append(chunk)
+                            sys.stderr.write(chunk)
+                            sys.stderr.flush()
+                    except (ValueError, OSError):
+                        pass
+                
+                stdout_thread = threading.Thread(target=read_stdout_retry, daemon=True)
+                stderr_thread = threading.Thread(target=read_stderr_retry, daemon=True)
+                
+                stdout_thread.start()
+                stderr_thread.start()
+                
+                returncode = process.wait()
+                
+                stdout_thread.join(timeout=5)
+                stderr_thread.join(timeout=5)
+                
+                stdout = ''.join(stdout_chunks)
+                stderr = ''.join(stderr_chunks)
+                
+                result = subprocess.CompletedProcess(
+                    cmd_no_output, returncode, stdout, stderr
+                )
+        else:
+            # For non-JSON mode, just run normally (output goes directly to terminal)
             result = subprocess.run(
-                cmd_no_output,
-                capture_output=True,
+                cmd,
                 text=True,
                 check=False
             )
+            # When not capturing output, stdout/stderr are None
+            stdout = result.stdout if result.stdout is not None else ""
+            stderr = result.stderr if result.stderr is not None else ""
         
         # Parse JSON if needed
         parsed_json = None
         if need_json and result.returncode == 0:
-            output = result.stdout.strip()
+            output = stdout.strip()
             
             # Try to parse JSON from stdout
             if output.startswith("{"):
@@ -75,7 +266,7 @@ def run_k8sgpt(k8sgpt_args: List[str], need_json: bool = False) -> Tuple[subproc
         return result, parsed_json
                 
     except FileNotFoundError:
-        print("Error: k8sgpt command not found. Please install k8sgpt first.", file=sys.stderr)
+        print(colorize(f"{Emoji.CROSS} Error: k8sgpt command not found. Please install k8sgpt first.", Colors.BOLD + Colors.RED), file=sys.stderr)
         sys.exit(1)
 
 
@@ -166,19 +357,21 @@ def group_solutions_by_error(solutions: List[Dict[str, Any]]) -> Dict[str, List[
 def display_errors(grouped: Dict[str, List[Dict[str, Any]]]):
     """Display errors in a user-friendly format."""
     if not grouped:
-        print("No errors found.")
+        print(colorize("No errors found.", Colors.YELLOW))
         return
     
-    print("\n" + "="*80)
-    print("DETECTED ISSUES")
-    print("="*80 + "\n")
+    print("\n" + colorize("="*80, Colors.CYAN))
+    print(colorize(f"{Emoji.BUG} DETECTED ISSUES", Colors.BOLD + Colors.CYAN))
+    print(colorize("="*80, Colors.CYAN) + "\n")
     
     error_id = 1
     for error_key, error_solutions in grouped.items():
         first_sol = error_solutions[0]
         error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
-        print(f"[{error_id}] {first_sol['kind']}: {first_sol['name']}")
-        print(f"    {error_display}")
+        kind_name = f"{first_sol['kind']}: {first_sol['name']}"
+        print(colorize(f"[{error_id}]", Colors.BRIGHT_CYAN) + " " + 
+              colorize(kind_name, Colors.BOLD + Colors.YELLOW))
+        print("    " + colorize(error_display, Colors.RED))
         print()
         error_id += 1
 
@@ -186,20 +379,23 @@ def display_errors(grouped: Dict[str, List[Dict[str, Any]]]):
 def display_solutions_for_error(error_solutions: List[Dict[str, Any]]):
     """Display solutions for a specific error."""
     if not error_solutions:
-        print("No solutions found for this error.")
+        print(colorize("No solutions found for this error.", Colors.YELLOW))
         return
     
     first_sol = error_solutions[0]
-    print("\n" + "="*80)
-    print(f"SOLUTIONS FOR: {first_sol['kind']}: {first_sol['name']}")
-    print("="*80)
+    kind_name = f"{first_sol['kind']}: {first_sol['name']}"
+    print("\n" + colorize("="*80, Colors.CYAN))
+    print(colorize(f"{Emoji.LIGHTBULB} SOLUTIONS FOR: {kind_name}", Colors.BOLD + Colors.CYAN))
+    print(colorize("="*80, Colors.CYAN))
     error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
-    print(f"Error: {error_display}")
-    print("\nSolutions:\n")
+    print(colorize("Error:", Colors.BOLD + Colors.RED) + " " + colorize(error_display, Colors.RED))
+    print("\n" + colorize(f"{Emoji.WRENCH} Solutions:", Colors.BOLD + Colors.GREEN) + "\n")
     
+    # Display as a numbered list
     for idx, sol in enumerate(error_solutions, 1):
         sol['display_id'] = idx
-        print(f"  [{idx}] {sol['solution']}")
+        print(colorize(f"{idx}.", Colors.BRIGHT_CYAN) + " " + 
+              colorize(sol['solution'], Colors.WHITE))
     print()
 
 
@@ -245,8 +441,12 @@ def select_solution(error_solutions: List[Dict[str, Any]]) -> Optional[Dict[str,
     
     while True:
         try:
-            print("\n" + "-"*80)
-            choice = input(f"Select a solution to execute (1-{max_id}), 'c' for custom solution, or 'q' to quit: ").strip()
+            print("\n" + colorize("-"*80, Colors.DIM))
+            prompt_text = colorize(f"{Emoji.ARROW} Select a solution to execute", Colors.BOLD + Colors.CYAN) + \
+                         colorize(f" (1-{max_id})", Colors.CYAN) + \
+                         colorize(", 'c' for custom solution", Colors.MAGENTA) + \
+                         colorize(", or 'q' to quit", Colors.DIM) + ": "
+            choice = input(prompt_text).strip()
             
             if choice.lower() == 'q':
                 return None
@@ -262,11 +462,11 @@ def select_solution(error_solutions: List[Dict[str, Any]]) -> Optional[Dict[str,
                 # Fallback: use index if display_id not found
                 return error_solutions[choice_num - 1]
             else:
-                print(f"Please enter a number between 1 and {max_id}, 'c' for custom, or 'q' to quit")
+                print(colorize(f"Please enter a number between 1 and {max_id}, 'c' for custom, or 'q' to quit", Colors.YELLOW))
         except ValueError:
-            print("Please enter a valid number, 'c' for custom solution, or 'q' to quit")
+            print(colorize("Please enter a valid number, 'c' for custom solution, or 'q' to quit", Colors.YELLOW))
         except KeyboardInterrupt:
-            print("\nCancelled.")
+            print("\n" + colorize("Cancelled.", Colors.YELLOW))
             return None
 
 
@@ -278,12 +478,13 @@ def prompt_custom_solution(solutions: List[Dict[str, Any]]) -> Optional[Dict[str
     # Get the first error context (they should all be similar if grouped)
     first_sol = solutions[0]
     
-    print("\n" + "-"*80)
-    print("Enter your custom solution:")
-    print(f"Context: {first_sol['kind']}: {first_sol['name']}")
+    print("\n" + colorize("-"*80, Colors.DIM))
+    print(colorize(f"{Emoji.WRENCH} Enter your custom solution:", Colors.BOLD + Colors.MAGENTA))
+    kind_name = f"{first_sol['kind']}: {first_sol['name']}"
+    print(colorize("Context:", Colors.BOLD) + " " + colorize(kind_name, Colors.YELLOW))
     error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
-    print(f"Error: {error_display}")
-    print("\n(Enter your solution text. Press Enter on an empty line to finish, or Ctrl+D/Ctrl+Z)")
+    print(colorize("Error:", Colors.BOLD + Colors.RED) + " " + colorize(error_display, Colors.RED))
+    print("\n" + colorize("(Enter your solution text. Press Enter on an empty line to finish, or Ctrl+D/Ctrl+Z)", Colors.DIM))
     
     try:
         custom_solution_lines = []
@@ -305,7 +506,7 @@ def prompt_custom_solution(solutions: List[Dict[str, Any]]) -> Optional[Dict[str
         custom_solution = "\n".join(custom_solution_lines).strip()
         
         if not custom_solution:
-            print("No solution entered. Cancelled.")
+            print(colorize("No solution entered. Cancelled.", Colors.YELLOW))
             return None
         
         # Create a solution dict with custom solution
@@ -318,14 +519,14 @@ def prompt_custom_solution(solutions: List[Dict[str, Any]]) -> Optional[Dict[str
             "is_custom": True
         }
     except KeyboardInterrupt:
-        print("\nCancelled.")
+        print("\n" + colorize("Cancelled.", Colors.YELLOW))
         return None
 
 
 def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
     """Execute the selected solution using kubectl-ai."""
-    print(f"\nExecuting solution with kubectl-ai...")
-    print(f"Solution: {solution['solution']}")
+    print(f"\n{colorize(f'{Emoji.ROCKET} Executing solution with kubectl-ai...', Colors.BOLD + Colors.GREEN)}")
+    print(colorize("Solution:", Colors.BOLD) + " " + colorize(solution['solution'], Colors.WHITE))
     
     # Construct the prompt for kubectl-ai
     prompt = f"Fix the following Kubernetes issue:\n\n"
@@ -335,25 +536,79 @@ def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
     prompt += f"Apply this solution: {solution['solution']}"
     
     try:
-        # Run kubectl-ai interactively with --model gemini-2.5-flash and the solution prompt
-        # Don't capture output so it runs interactively
-        result = subprocess.run(
+        # Run kubectl-ai interactively and monitor output
+        # When kubectl-ai stops producing output (no more prompts/questions), exit automatically
+        process = subprocess.Popen(
             ["kubectl", "ai", "--model", "gemini-2.5-flash", prompt],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False
+            bufsize=1
         )
         
-        if result.returncode == 0:
-            return True
-        else:
-            return False
+        # Stream output and detect when it stops
+        last_output_time = time.time()
+        no_output_timeout = 3.0  # If no output for 3 seconds, consider it done
+        max_wait_time = 300  # Maximum 5 minutes total
+        start_time = time.time()
+        has_output = False
+        
+        def read_stream(stream, is_stderr=False):
+            """Read from stream and print output."""
+            nonlocal last_output_time, has_output
+            try:
+                for line in stream:
+                    has_output = True
+                    last_output_time = time.time()
+                    if is_stderr:
+                        print(line, end='', file=sys.stderr, flush=True)
+                    else:
+                        print(line, end='', flush=True)
+            except (ValueError, OSError):
+                pass  # Stream closed
+        
+        # Start threads to read both streams
+        stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, False), daemon=True)
+        stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, True), daemon=True)
+        
+        stdout_thread.start()
+        stderr_thread.start()
+        
+        # Monitor until process exits or no output timeout
+        while process.poll() is None:
+            # Check max wait time
+            if time.time() - start_time > max_wait_time:
+                process.terminate()
+                break
+            
+            # Check if no output for timeout period (kubectl-ai stopped prompting)
+            if has_output and (time.time() - last_output_time) > no_output_timeout:
+                # No output for a while - kubectl-ai is done (no more prompts)
+                process.terminate()
+                break
+            
+            time.sleep(0.1)  # Small sleep to avoid busy waiting
+        
+        # Wait for threads to finish
+        stdout_thread.join(timeout=1)
+        stderr_thread.join(timeout=1)
+        
+        # Wait for process to complete
+        try:
+            returncode = process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            returncode = process.wait()
+        
+        return returncode == 0
             
     except FileNotFoundError:
-        print("Error: kubectl-ai command not found. Please install kubectl-ai plugin first.", file=sys.stderr)
-        print("Install with: kubectl krew install ai", file=sys.stderr)
+        print(colorize(f"{Emoji.CROSS} Error: kubectl-ai command not found.", Colors.BOLD + Colors.RED), file=sys.stderr)
+        print(colorize("Install with:", Colors.YELLOW) + " " + 
+              colorize("kubectl krew install ai", Colors.BOLD + Colors.CYAN), file=sys.stderr)
         return False
     except Exception as e:
-        print(f"Error executing solution: {e}", file=sys.stderr)
+        print(colorize(f"{Emoji.CROSS} Error executing solution: {e}", Colors.BOLD + Colors.RED), file=sys.stderr)
         return False
 
 
@@ -381,22 +636,8 @@ def main():
     
     if has_explain:
         # With --explain: run k8sgpt, parse JSON, show solutions, prompt to pick, execute
+        # Note: run_k8sgpt already prints output live (excluding JSON), so we don't need to print it again
         result, data = run_k8sgpt(k8sgpt_args, need_json=True)
-        
-        # Print any non-JSON output from k8sgpt (if any)
-        output = result.stdout.strip()
-        if output and not output.startswith("{"):
-            # Try to find where JSON starts
-            lines = output.split('\n')
-            json_start = None
-            for i, line in enumerate(lines):
-                if line.strip().startswith('{'):
-                    json_start = i
-                    break
-            
-            if json_start is not None and json_start > 0:
-                # Print everything before JSON
-                print('\n'.join(lines[:json_start]))
         
         # Check for errors
         if result.returncode != 0:
@@ -405,20 +646,20 @@ def main():
             sys.exit(result.returncode)
         
         if not data:
-            print("Error: Could not parse JSON output from k8sgpt", file=sys.stderr)
-            print(f"Output: {result.stdout}", file=sys.stderr)
+            print(colorize(f"{Emoji.CROSS} Error: Could not parse JSON output from k8sgpt", Colors.BOLD + Colors.RED), file=sys.stderr)
+            print(colorize(f"Output: {result.stdout}", Colors.YELLOW), file=sys.stderr)
             sys.exit(1)
         
         # Check if there are any problems
         if data.get("status") == "OK" or data.get("problems", 0) == 0:
-            print("✓ No problems detected!")
+            print(colorize(f"{Emoji.CHECK} No problems detected!", Colors.BOLD + Colors.GREEN))
             return
         
         # Extract solutions
         solutions = extract_solutions(data)
         
         if not solutions:
-            print("No solutions found in the analysis results.")
+            print(colorize(f"{Emoji.INFO} No solutions found in the analysis results.", Colors.YELLOW))
             return
         
         # Group solutions by error
@@ -434,7 +675,7 @@ def main():
                 if 1 <= args.auto_select <= len(error_solutions):
                     selected = error_solutions[args.auto_select - 1]
                 else:
-                    print(f"Error: Solution number {args.auto_select} is out of range (1-{len(error_solutions)})", file=sys.stderr)
+                    print(colorize(f"{Emoji.CROSS} Error: Solution number {args.auto_select} is out of range (1-{len(error_solutions)})", Colors.BOLD + Colors.RED), file=sys.stderr)
                     sys.exit(1)
             else:
                 selected = select_solution(error_solutions)
@@ -444,7 +685,7 @@ def main():
                 success = execute_with_kubectl_ai(selected)
                 sys.exit(0 if success else 1)
             else:
-                print("No solution selected. Exiting.")
+                print(colorize("No solution selected. Exiting.", Colors.YELLOW))
         else:
             # Multiple errors: first select error, then solution
             display_errors(grouped)
@@ -452,7 +693,7 @@ def main():
             # Select error
             error_selection = select_error(grouped)
             if not error_selection:
-                print("No error selected. Exiting.")
+                print(colorize("No error selected. Exiting.", Colors.YELLOW))
                 return
             
             error_key, error_solutions = error_selection
@@ -463,7 +704,7 @@ def main():
                 if 1 <= args.auto_select <= len(error_solutions):
                     selected = error_solutions[args.auto_select - 1]
                 else:
-                    print(f"Error: Solution number {args.auto_select} is out of range (1-{len(error_solutions)})", file=sys.stderr)
+                    print(colorize(f"{Emoji.CROSS} Error: Solution number {args.auto_select} is out of range (1-{len(error_solutions)})", Colors.BOLD + Colors.RED), file=sys.stderr)
                     sys.exit(1)
             else:
                 selected = select_solution(error_solutions)
@@ -473,21 +714,24 @@ def main():
                 success = execute_with_kubectl_ai(selected)
                 sys.exit(0 if success else 1)
             else:
-                print("No solution selected. Exiting.")
+                print(colorize("No solution selected. Exiting.", Colors.YELLOW))
     else:
         # Without --explain: behave exactly like k8sgpt
         # First try to run normally (without forcing JSON)
         result, _ = run_k8sgpt(k8sgpt_args, need_json=False)
         
-        # Print the original k8sgpt output
-        print(result.stdout, end='')
+        # Print the original k8sgpt output (if captured)
+        # Note: When not capturing, output goes directly to terminal, so result.stdout is None
+        if result.stdout:
+            print(result.stdout, end='')
         if result.stderr:
             print(result.stderr, file=sys.stderr)
         
         # Try to parse JSON from output if available (for showing solutions)
-        output = result.stdout.strip()
+        # result.stdout might be None if output wasn't captured
+        output = result.stdout.strip() if result.stdout else ""
         data = None
-        if output.startswith("{"):
+        if output and output.startswith("{"):
             try:
                 data = json.loads(output)
             except json.JSONDecodeError:
@@ -515,20 +759,23 @@ def main():
                 if solutions:
                     # Group and display solutions by error
                     grouped = group_solutions_by_error(solutions)
-                    print("\n" + "="*80)
-                    print("SOLUTIONS SUMMARY")
-                    print("="*80 + "\n")
+                    print("\n" + colorize("="*80, Colors.CYAN))
+                    print(colorize(f"{Emoji.CLIPBOARD} SOLUTIONS SUMMARY", Colors.BOLD + Colors.CYAN))
+                    print(colorize("="*80, Colors.CYAN) + "\n")
                     
                     for error_key, error_solutions in grouped.items():
                         first_sol = error_solutions[0]
-                        print(f"Error: {first_sol['kind']}: {first_sol['name']}")
+                        kind_name = f"{first_sol['kind']}: {first_sol['name']}"
+                        print(colorize("Error:", Colors.BOLD + Colors.RED) + " " + 
+                              colorize(kind_name, Colors.YELLOW))
                         error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
-                        print(f"  {error_display}")
-                        print(f"\n  Solutions:")
+                        print("  " + colorize(error_display, Colors.RED))
+                        print(f"\n  {colorize('Solutions:', Colors.BOLD + Colors.GREEN)}")
                         for idx, sol in enumerate(error_solutions, 1):
-                            print(f"    [{idx}] {sol['solution']}")
+                            print("    " + colorize(f"[{idx}]", Colors.BRIGHT_CYAN) + " " + 
+                                  colorize(sol['solution'], Colors.WHITE))
                         print()
-                    print("(Use --explain flag to interactively select and execute solutions)")
+                    print(colorize("(Use --explain flag to interactively select and execute solutions)", Colors.DIM))
         
         sys.exit(result.returncode)
 
