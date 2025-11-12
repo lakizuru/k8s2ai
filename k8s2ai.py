@@ -8,27 +8,25 @@ import subprocess
 import sys
 import argparse
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 
-def run_k8sgpt_analyze(k8sgpt_args: List[str]) -> Dict[str, Any]:
-    """Run k8sgpt with provided arguments and return parsed JSON output."""
+def run_k8sgpt(k8sgpt_args: List[str], need_json: bool = False) -> Tuple[subprocess.CompletedProcess, Optional[Dict[str, Any]]]:
+    """Run k8sgpt with provided arguments and return the result and optionally parsed JSON."""
     try:
         # Build the command
         cmd = ["k8sgpt"] + k8sgpt_args
         
-        # Ensure we get JSON output - add --output json if not present
-        # Check if --output or -o is already in the args (could be --output json or -o json)
-        has_output_flag = False
-        for i, arg in enumerate(k8sgpt_args):
-            if arg in ["--output", "-o"]:
-                has_output_flag = True
-                break
-        
-        if not has_output_flag:
-            cmd.extend(["--output", "json"])
-        
-        print(f"Running: {' '.join(cmd)}")
+        # If we need JSON output, add --output json if not present
+        if need_json:
+            has_output_flag = False
+            for arg in k8sgpt_args:
+                if arg in ["--output", "-o"]:
+                    has_output_flag = True
+                    break
+            
+            if not has_output_flag:
+                cmd.extend(["--output", "json"])
         
         result = subprocess.run(
             cmd,
@@ -38,45 +36,44 @@ def run_k8sgpt_analyze(k8sgpt_args: List[str]) -> Dict[str, Any]:
         )
         
         # If command failed and we added --output json, try without it (in case it's not supported)
-        if result.returncode != 0 and not has_output_flag:
-            # Remove --output json and try again
+        if result.returncode != 0 and need_json and not has_output_flag:
             cmd_no_output = ["k8sgpt"] + k8sgpt_args
-            print(f"Retrying without --output json: {' '.join(cmd_no_output)}")
             result = subprocess.run(
                 cmd_no_output,
                 capture_output=True,
                 text=True,
-                check=True
+                check=False
             )
         
-        # Try to parse JSON from stdout
-        output = result.stdout.strip()
-        
-        # Sometimes JSON might be mixed with other output, try to extract it
-        if output.startswith("{"):
-            return json.loads(output)
-        else:
-            # Try to find JSON in the output
-            lines = output.split('\n')
-            json_start = None
-            for i, line in enumerate(lines):
-                if line.strip().startswith('{'):
-                    json_start = i
-                    break
+        # Parse JSON if needed
+        parsed_json = None
+        if need_json and result.returncode == 0:
+            output = result.stdout.strip()
             
-            if json_start is not None:
-                json_str = '\n'.join(lines[json_start:])
-                return json.loads(json_str)
+            # Try to parse JSON from stdout
+            if output.startswith("{"):
+                try:
+                    parsed_json = json.loads(output)
+                except json.JSONDecodeError:
+                    pass
             else:
-                raise ValueError("No JSON found in output")
+                # Try to find JSON in the output
+                lines = output.split('\n')
+                json_start = None
+                for i, line in enumerate(lines):
+                    if line.strip().startswith('{'):
+                        json_start = i
+                        break
                 
-    except subprocess.CalledProcessError as e:
-        print(f"Error running k8sgpt: {e.stderr}", file=sys.stderr)
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(f"Error parsing JSON output: {e}", file=sys.stderr)
-        print(f"Output was: {result.stdout}", file=sys.stderr)
-        sys.exit(1)
+                if json_start is not None:
+                    json_str = '\n'.join(lines[json_start:])
+                    try:
+                        parsed_json = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        pass
+        
+        return result, parsed_json
+                
     except FileNotFoundError:
         print("Error: k8sgpt command not found. Please install k8sgpt first.", file=sys.stderr)
         sys.exit(1)
@@ -154,46 +151,138 @@ def extract_solutions(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return solutions
 
 
+def group_solutions_by_error(solutions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Group solutions by error (kind + name + error text)."""
+    grouped = {}
+    for sol in solutions:
+        # Create a unique key for each error
+        key = f"{sol['kind']}|{sol['name']}|{sol['error']}"
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(sol)
+    return grouped
+
+
 def display_solutions(solutions: List[Dict[str, Any]]):
-    """Display solutions in a user-friendly format."""
+    """Display solutions grouped by error in a user-friendly format."""
     if not solutions:
         print("No solutions found.")
         return
+    
+    # Group solutions by error
+    grouped = group_solutions_by_error(solutions)
     
     print("\n" + "="*80)
     print("DETECTED ISSUES AND SOLUTIONS")
     print("="*80 + "\n")
     
-    for sol in solutions:
-        print(f"[{sol['id']}] {sol['kind']}: {sol['name']}")
-        print(f"    Error: {sol['error'][:100]}..." if len(sol['error']) > 100 else f"    Error: {sol['error']}")
-        print(f"    Solution: {sol['solution']}")
+    solution_id = 1
+    for error_key, error_solutions in grouped.items():
+        # All solutions in this group have the same kind, name, and error
+        first_sol = error_solutions[0]
+        
+        print(f"Error: {first_sol['kind']}: {first_sol['name']}")
+        error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
+        print(f"  {error_display}")
+        print(f"\n  Solutions:")
+        
+        for sol in error_solutions:
+            sol['display_id'] = solution_id
+            print(f"    [{solution_id}] {sol['solution']}")
+            solution_id += 1
         print()
 
 
 def select_solution(solutions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Prompt user to select a solution."""
+    """Prompt user to select a solution or enter a custom one."""
     if not solutions:
         return None
+    
+    # Create a mapping from display_id to solution
+    id_to_solution = {}
+    for sol in solutions:
+        if 'display_id' in sol:
+            id_to_solution[sol['display_id']] = sol
+    
+    max_id = max(id_to_solution.keys()) if id_to_solution else len(solutions)
     
     while True:
         try:
             print("\n" + "-"*80)
-            choice = input(f"Select a solution to execute (1-{len(solutions)}) or 'q' to quit: ").strip()
+            choice = input(f"Select a solution to execute (1-{max_id}), 'c' for custom solution, or 'q' to quit: ").strip()
             
             if choice.lower() == 'q':
                 return None
             
+            if choice.lower() == 'c':
+                # Prompt for custom solution
+                return prompt_custom_solution(solutions)
+            
             choice_num = int(choice)
-            if 1 <= choice_num <= len(solutions):
+            if choice_num in id_to_solution:
+                return id_to_solution[choice_num]
+            elif 1 <= choice_num <= len(solutions):
+                # Fallback: use index if display_id not found
                 return solutions[choice_num - 1]
             else:
-                print(f"Please enter a number between 1 and {len(solutions)}")
+                print(f"Please enter a number between 1 and {max_id}, 'c' for custom, or 'q' to quit")
         except ValueError:
-            print("Please enter a valid number or 'q' to quit")
+            print("Please enter a valid number, 'c' for custom solution, or 'q' to quit")
         except KeyboardInterrupt:
             print("\nCancelled.")
             return None
+
+
+def prompt_custom_solution(solutions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Prompt user to enter a custom solution."""
+    if not solutions:
+        return None
+    
+    # Get the first error context (they should all be similar if grouped)
+    first_sol = solutions[0]
+    
+    print("\n" + "-"*80)
+    print("Enter your custom solution:")
+    print(f"Context: {first_sol['kind']}: {first_sol['name']}")
+    error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
+    print(f"Error: {error_display}")
+    print("\n(Enter your solution text. Press Enter on an empty line to finish, or Ctrl+D/Ctrl+Z)")
+    
+    try:
+        custom_solution_lines = []
+        
+        while True:
+            try:
+                line = input()
+                if line.strip() == "":
+                    if custom_solution_lines:
+                        # Empty line after content - finish
+                        break
+                    # Empty line before any content - continue
+                    continue
+                custom_solution_lines.append(line)
+            except EOFError:
+                # Ctrl+D (Unix) or Ctrl+Z (Windows) pressed
+                break
+        
+        custom_solution = "\n".join(custom_solution_lines).strip()
+        
+        if not custom_solution:
+            print("No solution entered. Cancelled.")
+            return None
+        
+        # Create a solution dict with custom solution
+        return {
+            "kind": first_sol['kind'],
+            "name": first_sol['name'],
+            "error": first_sol['error'],
+            "solution": custom_solution,
+            "full_details": f"Custom solution: {custom_solution}",
+            "is_custom": True
+        }
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return None
 
 
 def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
@@ -209,36 +298,17 @@ def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
     prompt += f"Apply this solution: {solution['solution']}"
     
     try:
-        # Try different kubectl-ai command formats
-        # Format 1: kubectl ai "prompt text" (most common)
+        # Run kubectl-ai interactively with --model gemini-2.5-flash and the solution prompt
+        # Don't capture output so it runs interactively
         result = subprocess.run(
-            ["kubectl", "ai", prompt],
+            ["kubectl", "ai", "--model", "gemini-2.5-flash", prompt],
             text=True,
-            check=False,
-            capture_output=True
+            check=False
         )
         
-        # If that fails, try with stdin input
-        if result.returncode != 0:
-            result = subprocess.run(
-                ["kubectl", "ai"],
-                input=prompt,
-                text=True,
-                check=False,
-                capture_output=True
-            )
-        
         if result.returncode == 0:
-            print("\n✓ Solution executed successfully!")
-            if result.stdout:
-                print(result.stdout)
             return True
         else:
-            print(f"\n✗ Error executing solution (exit code: {result.returncode})", file=sys.stderr)
-            if result.stderr:
-                print(f"Error output: {result.stderr}", file=sys.stderr)
-            if result.stdout:
-                print(f"Output: {result.stdout}", file=sys.stderr)
             return False
             
     except FileNotFoundError:
@@ -252,59 +322,71 @@ def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze Kubernetes issues with k8sgpt and execute solutions via kubectl-ai",
-        add_help=False  # We'll handle help separately
-    )
-    parser.add_argument(
-        "--json-output",
-        action="store_true",
-        help="Output raw JSON from k8sgpt (for debugging)"
+        description="k8s2ai - Alias for k8sgpt with kubectl-ai integration",
+        add_help=False
     )
     parser.add_argument(
         "--auto-select",
         type=int,
         metavar="N",
-        help="Automatically select solution N without prompting"
-    )
-    parser.add_argument(
-        "--help",
-        action="help",
-        help="Show this help message and exit"
+        help="Automatically select solution N without prompting (requires --explain)"
     )
     
     # Parse known args and capture remaining args for k8sgpt
     args, k8sgpt_args = parser.parse_known_args()
     
-    # If no k8sgpt args provided, default to "analyze --explain"
+    # If no k8sgpt args provided, default to "analyze"
     if not k8sgpt_args:
-        k8sgpt_args = ["analyze", "--explain"]
+        k8sgpt_args = ["analyze"]
     
-    # Run k8sgpt with provided arguments
-    data = run_k8sgpt_analyze(k8sgpt_args)
-    
-    if args.json_output:
-        print(json.dumps(data, indent=2))
-        return
-    
-    # Check if there are any problems
-    if data.get("status") == "OK" or data.get("problems", 0) == 0:
-        print("✓ No problems detected!")
-        return
-    
-    # Extract solutions
-    solutions = extract_solutions(data)
-    
-    if not solutions:
-        print("No solutions found in the analysis results.")
-        return
-    
-    # Display solutions
-    display_solutions(solutions)
-    
-    # Only prompt for solution selection if --explain flag is present
+    # Check if --explain is present
     has_explain = "--explain" in k8sgpt_args
     
     if has_explain:
+        # With --explain: run k8sgpt, parse JSON, show solutions, prompt to pick, execute
+        result, data = run_k8sgpt(k8sgpt_args, need_json=True)
+        
+        # Print any non-JSON output from k8sgpt (if any)
+        output = result.stdout.strip()
+        if output and not output.startswith("{"):
+            # Try to find where JSON starts
+            lines = output.split('\n')
+            json_start = None
+            for i, line in enumerate(lines):
+                if line.strip().startswith('{'):
+                    json_start = i
+                    break
+            
+            if json_start is not None and json_start > 0:
+                # Print everything before JSON
+                print('\n'.join(lines[:json_start]))
+        
+        # Check for errors
+        if result.returncode != 0:
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+            sys.exit(result.returncode)
+        
+        if not data:
+            print("Error: Could not parse JSON output from k8sgpt", file=sys.stderr)
+            print(f"Output: {result.stdout}", file=sys.stderr)
+            sys.exit(1)
+        
+        # Check if there are any problems
+        if data.get("status") == "OK" or data.get("problems", 0) == 0:
+            print("✓ No problems detected!")
+            return
+        
+        # Extract solutions
+        solutions = extract_solutions(data)
+        
+        if not solutions:
+            print("No solutions found in the analysis results.")
+            return
+        
+        # Display solutions
+        display_solutions(solutions)
+        
         # Select solution
         if args.auto_select:
             if 1 <= args.auto_select <= len(solutions):
@@ -322,10 +404,64 @@ def main():
         else:
             print("No solution selected. Exiting.")
     else:
-        # Without --explain, just show solutions and exit
-        if args.auto_select:
-            print("Note: --auto-select requires --explain flag to execute solutions.", file=sys.stderr)
-        print("\n(Use --explain flag to interactively select and execute solutions)")
+        # Without --explain: behave exactly like k8sgpt
+        # First try to run normally (without forcing JSON)
+        result, _ = run_k8sgpt(k8sgpt_args, need_json=False)
+        
+        # Print the original k8sgpt output
+        print(result.stdout, end='')
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        
+        # Try to parse JSON from output if available (for showing solutions)
+        output = result.stdout.strip()
+        data = None
+        if output.startswith("{"):
+            try:
+                data = json.loads(output)
+            except json.JSONDecodeError:
+                pass
+        else:
+            # Try to find JSON in the output
+            lines = output.split('\n')
+            json_start = None
+            for i, line in enumerate(lines):
+                if line.strip().startswith('{'):
+                    json_start = i
+                    break
+            
+            if json_start is not None:
+                json_str = '\n'.join(lines[json_start:])
+                try:
+                    data = json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+        
+        # If we got JSON and there are problems, also show solutions in a nice format
+        if data and result.returncode == 0:
+            if data.get("status") != "OK" and data.get("problems", 0) > 0:
+                solutions = extract_solutions(data)
+                if solutions:
+                    # Group and display solutions
+                    grouped = group_solutions_by_error(solutions)
+                    print("\n" + "="*80)
+                    print("SOLUTIONS SUMMARY")
+                    print("="*80 + "\n")
+                    
+                    solution_id = 1
+                    for error_key, error_solutions in grouped.items():
+                        first_sol = error_solutions[0]
+                        print(f"Error: {first_sol['kind']}: {first_sol['name']}")
+                        error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
+                        print(f"  {error_display}")
+                        print(f"\n  Solutions:")
+                        for sol in error_solutions:
+                            print(f"    [{solution_id}] {sol['solution']}")
+                            solution_id += 1
+                        print()
+                    print("(Use --explain flag to interactively select and execute solutions)")
+        
+        sys.exit(result.returncode)
 
 
 if __name__ == "__main__":

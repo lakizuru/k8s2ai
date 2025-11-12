@@ -4,7 +4,7 @@ A CLI tool that bridges `k8sgpt` and `kubectl-ai` to automatically analyze Kuber
 
 ## Overview
 
-`k8s2ai` runs `k8sgpt analyze --explain` to detect Kubernetes issues, extracts solution options from the JSON output, prompts you to select a solution, and then executes it using `kubectl-ai`.
+`k8s2ai` is a drop-in alias for `k8sgpt` with enhanced functionality. It passes all arguments directly to `k8sgpt`, and when used with `--explain`, it can interactively select and execute solutions using `kubectl-ai`.
 
 ## Prerequisites
 
@@ -29,38 +29,36 @@ A CLI tool that bridges `k8sgpt` and `kubectl-ai` to automatically analyze Kuber
 
 ### Basic Usage
 
-```bash
-# Default: runs k8sgpt analyze --explain
-python3 k8s2ai.py
+`k8s2ai` works as a drop-in replacement for `k8sgpt`. All arguments are passed directly to `k8sgpt`:
 
-# Pass any k8sgpt arguments directly
-python3 k8s2ai.py analyze --explain -f Pod  # Shows prompt to select solution
-python3 k8s2ai.py analyze -f Pod             # Just shows solutions, no prompt
+```bash
+# Works exactly like k8sgpt analyze
+python3 k8s2ai.py analyze
+python3 k8s2ai.py analyze -f Pod
+python3 k8s2ai.py analyze --namespace default
+
+# With --explain: shows solutions and prompts to select one for execution
+python3 k8s2ai.py analyze --explain
+python3 k8s2ai.py analyze --explain -f Pod
 python3 k8s2ai.py analyze --explain --namespace default
-python3 k8s2ai.py analyze --explain --filter Pod,Deployment
 ```
 
-This will:
-1. Run `k8sgpt` with the provided arguments (defaults to `analyze --explain`)
-2. Parse the JSON output
-3. Display detected issues and solutions
-4. **If `--explain` flag is present**: Prompt you to select a solution and execute it with `kubectl-ai`
-5. **If `--explain` flag is NOT present**: Just display solutions and exit (no prompt, no execution)
+**Behavior:**
+- **Without `--explain`**: Behaves exactly like `k8sgpt` - shows the analysis output and solutions summary
+- **With `--explain`**: Runs `k8sgpt analyze --explain`, shows solutions, prompts you to select one, and executes it with `kubectl-ai`
 
 ### Command Line Options
 
 ```bash
-# View raw JSON output (for debugging)
-python3 k8s2ai.py analyze --explain --json-output
-
-# Automatically select solution #1 without prompting
+# Automatically select solution #1 without prompting (requires --explain)
 python3 k8s2ai.py analyze --explain -f Pod --auto-select 1
 
-# Combine k8sgpt args with k8s2ai options
-python3 k8s2ai.py --auto-select 2 analyze --explain --namespace my-namespace
+# All other arguments are passed directly to k8sgpt
+python3 k8s2ai.py analyze --output json
+python3 k8s2ai.py analyze --filter Pod,Deployment
 ```
 
-**Note**: All arguments after `k8s2ai`-specific options (`--json-output`, `--auto-select`) are passed directly to `k8sgpt`. The tool automatically adds `--output json` if not already specified to ensure JSON parsing works correctly.
+**Note**: `k8s2ai` passes all arguments directly to `k8sgpt`. The only `k8s2ai`-specific option is `--auto-select`, which requires the `--explain` flag.
 
 ## Example Output
 
