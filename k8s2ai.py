@@ -527,6 +527,7 @@ def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
     """Execute the selected solution using kubectl-ai."""
     print(f"\n{colorize(f'{Emoji.ROCKET} Executing solution with kubectl-ai...', Colors.BOLD + Colors.GREEN)}")
     print(colorize("Solution:", Colors.BOLD) + " " + colorize(solution['solution'], Colors.WHITE))
+    print()  # Add blank line before kubectl-ai output
     
     # Construct the prompt for kubectl-ai
     prompt = f"Fix the following Kubernetes issue:\n\n"
@@ -536,71 +537,14 @@ def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
     prompt += f"Apply this solution: {solution['solution']}"
     
     try:
-        # Run kubectl-ai interactively and monitor output
-        # When kubectl-ai stops producing output (no more prompts/questions), exit automatically
-        process = subprocess.Popen(
+        # Run kubectl-ai with direct terminal output (no capture)
+        # This ensures all output is displayed in real-time
+        result = subprocess.run(
             ["kubectl", "ai", "--model", "gemini-2.5-flash", prompt],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1
+            text=True
         )
         
-        # Stream output and detect when it stops
-        last_output_time = time.time()
-        no_output_timeout = 3.0  # If no output for 3 seconds, consider it done
-        max_wait_time = 300  # Maximum 5 minutes total
-        start_time = time.time()
-        has_output = False
-        
-        def read_stream(stream, is_stderr=False):
-            """Read from stream and print output."""
-            nonlocal last_output_time, has_output
-            try:
-                for line in stream:
-                    has_output = True
-                    last_output_time = time.time()
-                    if is_stderr:
-                        print(line, end='', file=sys.stderr, flush=True)
-                    else:
-                        print(line, end='', flush=True)
-            except (ValueError, OSError):
-                pass  # Stream closed
-        
-        # Start threads to read both streams
-        stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, False), daemon=True)
-        stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, True), daemon=True)
-        
-        stdout_thread.start()
-        stderr_thread.start()
-        
-        # Monitor until process exits or no output timeout
-        while process.poll() is None:
-            # Check max wait time
-            if time.time() - start_time > max_wait_time:
-                process.terminate()
-                break
-            
-            # Check if no output for timeout period (kubectl-ai stopped prompting)
-            if has_output and (time.time() - last_output_time) > no_output_timeout:
-                # No output for a while - kubectl-ai is done (no more prompts)
-                process.terminate()
-                break
-            
-            time.sleep(0.1)  # Small sleep to avoid busy waiting
-        
-        # Wait for threads to finish
-        stdout_thread.join(timeout=1)
-        stderr_thread.join(timeout=1)
-        
-        # Wait for process to complete
-        try:
-            returncode = process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            returncode = process.wait()
-        
-        return returncode == 0
+        return result.returncode == 0
             
     except FileNotFoundError:
         print(colorize(f"{Emoji.CROSS} Error: kubectl-ai command not found.", Colors.BOLD + Colors.RED), file=sys.stderr)
@@ -610,6 +554,155 @@ def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
     except Exception as e:
         print(colorize(f"{Emoji.CROSS} Error executing solution: {e}", Colors.BOLD + Colors.RED), file=sys.stderr)
         return False
+
+
+def check_tool_installed(tool_name: str, check_cmd: List[str]) -> bool:
+    """Check if a tool is installed."""
+    try:
+        result = subprocess.run(
+            check_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def init_setup():
+    """Initialize k8s2ai by checking dependencies and setting up Gemini API."""
+    print(colorize(f"\n{Emoji.ROCKET} k8s2ai Initialization", Colors.BOLD + Colors.CYAN))
+    print(colorize("="*80, Colors.CYAN) + "\n")
+    
+    # Check if k8sgpt is installed
+    print(colorize(f"{Emoji.MAG} Checking dependencies...", Colors.BOLD))
+    
+    k8sgpt_installed = check_tool_installed("k8sgpt", ["k8sgpt", "version"])
+    if k8sgpt_installed:
+        print(colorize(f"  {Emoji.CHECK} k8sgpt is installed", Colors.GREEN))
+    else:
+        print(colorize(f"  {Emoji.CROSS} k8sgpt is NOT installed", Colors.RED))
+        print(colorize("    Install from: https://docs.k8sgpt.ai/getting-started/installation/", Colors.YELLOW))
+    
+    # Check if kubectl-ai is installed
+    kubectl_ai_installed = check_tool_installed("kubectl-ai", ["kubectl", "ai", "--help"])
+    if kubectl_ai_installed:
+        print(colorize(f"  {Emoji.CHECK} kubectl-ai is installed", Colors.GREEN))
+    else:
+        print(colorize(f"  {Emoji.CROSS} kubectl-ai is NOT installed", Colors.RED))
+        print(colorize("    Install with: kubectl krew install ai", Colors.YELLOW))
+    
+    # Exit if dependencies are not met
+    if not k8sgpt_installed or not kubectl_ai_installed:
+        print(colorize(f"\n{Emoji.CROSS} Please install missing dependencies before continuing.", Colors.BOLD + Colors.RED))
+        sys.exit(1)
+    
+    print()
+    
+    # Prompt for Gemini API key
+    print(colorize(f"{Emoji.WRENCH} Setting up Gemini API...", Colors.BOLD))
+    try:
+        gemini_api_key = input(colorize("Enter your Gemini API key: ", Colors.CYAN)).strip()
+        
+        if not gemini_api_key:
+            print(colorize(f"{Emoji.CROSS} No API key provided. Exiting.", Colors.RED))
+            sys.exit(1)
+        
+        # Export to shell
+        print(colorize(f"\n{Emoji.INFO} Exporting GEMINI_API_KEY to environment...", Colors.YELLOW))
+        os.environ["GEMINI_API_KEY"] = gemini_api_key
+        
+        # Determine shell config file
+        shell = os.environ.get("SHELL", "")
+        home = os.path.expanduser("~")
+        
+        if "zsh" in shell:
+            config_file = os.path.join(home, ".zshrc")
+        elif "bash" in shell:
+            config_file = os.path.join(home, ".bashrc")
+        else:
+            config_file = os.path.join(home, ".profile")
+        
+        # Add export to shell config file
+        export_line = f'\nexport GEMINI_API_KEY="{gemini_api_key}"\n'
+        
+        try:
+            # Check if already exists
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    content = f.read()
+                    if 'GEMINI_API_KEY' in content:
+                        print(colorize(f"  {Emoji.INFO} GEMINI_API_KEY already exists in {config_file}", Colors.YELLOW))
+                        update = input(colorize("  Update it? (y/N): ", Colors.CYAN)).strip().lower()
+                        if update != 'y':
+                            print(colorize("  Skipping update to config file.", Colors.YELLOW))
+                        else:
+                            # Remove old lines and add new
+                            lines = content.split('\n')
+                            new_lines = [line for line in lines if 'GEMINI_API_KEY' not in line]
+                            with open(config_file, 'w') as f:
+                                f.write('\n'.join(new_lines))
+                                f.write(export_line)
+                            print(colorize(f"  {Emoji.CHECK} Updated {config_file}", Colors.GREEN))
+                    else:
+                        with open(config_file, 'a') as f:
+                            f.write(export_line)
+                        print(colorize(f"  {Emoji.CHECK} Added GEMINI_API_KEY to {config_file}", Colors.GREEN))
+            else:
+                with open(config_file, 'w') as f:
+                    f.write(export_line)
+                print(colorize(f"  {Emoji.CHECK} Created {config_file} with GEMINI_API_KEY", Colors.GREEN))
+        except Exception as e:
+            print(colorize(f"  {Emoji.WARNING} Could not write to {config_file}: {e}", Colors.YELLOW))
+            print(colorize(f"  Please manually add: export GEMINI_API_KEY=\"{gemini_api_key}\"", Colors.YELLOW))
+        
+        # Configure k8sgpt auth
+        print(colorize(f"\n{Emoji.WRENCH} Configuring k8sgpt authentication...", Colors.BOLD))
+        
+        # Add auth backend
+        print(colorize(f"  Adding Google backend...", Colors.CYAN))
+        result = subprocess.run(
+            ["k8sgpt", "auth", "add", "--backend", "google", "--model", "gemini-pro", "--password", gemini_api_key],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(colorize(f"  {Emoji.CHECK} Google backend added successfully", Colors.GREEN))
+        else:
+            print(colorize(f"  {Emoji.CROSS} Failed to add Google backend", Colors.RED))
+            if result.stderr:
+                print(colorize(f"  Error: {result.stderr}", Colors.RED))
+            sys.exit(1)
+        
+        # Set default provider
+        print(colorize(f"  Setting Google as default provider...", Colors.CYAN))
+        result = subprocess.run(
+            ["k8sgpt", "auth", "default", "-p", "google"],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(colorize(f"  {Emoji.CHECK} Google set as default provider", Colors.GREEN))
+        else:
+            print(colorize(f"  {Emoji.CROSS} Failed to set default provider", Colors.RED))
+            if result.stderr:
+                print(colorize(f"  Error: {result.stderr}", Colors.RED))
+            sys.exit(1)
+        
+        print(colorize(f"\n{Emoji.STAR} Initialization complete!", Colors.BOLD + Colors.GREEN))
+        print(colorize(f"\nTo apply the environment variable in your current shell, run:", Colors.YELLOW))
+        print(colorize(f"  export GEMINI_API_KEY=\"{gemini_api_key}\"", Colors.BOLD + Colors.CYAN))
+        print(colorize(f"\nOr restart your terminal to load from {config_file}", Colors.YELLOW))
+        
+    except KeyboardInterrupt:
+        print(colorize(f"\n{Emoji.CROSS} Initialization cancelled.", Colors.YELLOW))
+        sys.exit(1)
+    except Exception as e:
+        print(colorize(f"\n{Emoji.CROSS} Error during initialization: {e}", Colors.RED))
+        sys.exit(1)
 
 
 def main():
@@ -626,6 +719,11 @@ def main():
     
     # Parse known args and capture remaining args for k8sgpt
     args, k8sgpt_args = parser.parse_known_args()
+    
+    # Check if 'init' command is provided
+    if k8sgpt_args and k8sgpt_args[0] == "init":
+        init_setup()
+        return
     
     # If no k8sgpt args provided, default to "analyze"
     if not k8sgpt_args:
