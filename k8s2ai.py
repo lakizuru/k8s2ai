@@ -163,48 +163,85 @@ def group_solutions_by_error(solutions: List[Dict[str, Any]]) -> Dict[str, List[
     return grouped
 
 
-def display_solutions(solutions: List[Dict[str, Any]]):
-    """Display solutions grouped by error in a user-friendly format."""
-    if not solutions:
-        print("No solutions found.")
+def display_errors(grouped: Dict[str, List[Dict[str, Any]]]):
+    """Display errors in a user-friendly format."""
+    if not grouped:
+        print("No errors found.")
         return
     
-    # Group solutions by error
-    grouped = group_solutions_by_error(solutions)
-    
     print("\n" + "="*80)
-    print("DETECTED ISSUES AND SOLUTIONS")
+    print("DETECTED ISSUES")
     print("="*80 + "\n")
     
-    solution_id = 1
+    error_id = 1
     for error_key, error_solutions in grouped.items():
-        # All solutions in this group have the same kind, name, and error
         first_sol = error_solutions[0]
-        
-        print(f"Error: {first_sol['kind']}: {first_sol['name']}")
         error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
-        print(f"  {error_display}")
-        print(f"\n  Solutions:")
-        
-        for sol in error_solutions:
-            sol['display_id'] = solution_id
-            print(f"    [{solution_id}] {sol['solution']}")
-            solution_id += 1
+        print(f"[{error_id}] {first_sol['kind']}: {first_sol['name']}")
+        print(f"    {error_display}")
         print()
+        error_id += 1
 
 
-def select_solution(solutions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Prompt user to select a solution or enter a custom one."""
-    if not solutions:
+def display_solutions_for_error(error_solutions: List[Dict[str, Any]]):
+    """Display solutions for a specific error."""
+    if not error_solutions:
+        print("No solutions found for this error.")
+        return
+    
+    first_sol = error_solutions[0]
+    print("\n" + "="*80)
+    print(f"SOLUTIONS FOR: {first_sol['kind']}: {first_sol['name']}")
+    print("="*80)
+    error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
+    print(f"Error: {error_display}")
+    print("\nSolutions:\n")
+    
+    for idx, sol in enumerate(error_solutions, 1):
+        sol['display_id'] = idx
+        print(f"  [{idx}] {sol['solution']}")
+    print()
+
+
+def select_error(grouped: Dict[str, List[Dict[str, Any]]]) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """Prompt user to select which error to work on."""
+    if not grouped:
+        return None
+    
+    error_list = list(grouped.items())
+    
+    while True:
+        try:
+            print("\n" + "-"*80)
+            choice = input(f"Select an error to work on (1-{len(error_list)}) or 'q' to quit: ").strip()
+            
+            if choice.lower() == 'q':
+                return None
+            
+            choice_num = int(choice)
+            if 1 <= choice_num <= len(error_list):
+                return error_list[choice_num - 1]
+            else:
+                print(f"Please enter a number between 1 and {len(error_list)}")
+        except ValueError:
+            print("Please enter a valid number or 'q' to quit")
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            return None
+
+
+def select_solution(error_solutions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Prompt user to select a solution or enter a custom one for the selected error."""
+    if not error_solutions:
         return None
     
     # Create a mapping from display_id to solution
     id_to_solution = {}
-    for sol in solutions:
+    for sol in error_solutions:
         if 'display_id' in sol:
             id_to_solution[sol['display_id']] = sol
     
-    max_id = max(id_to_solution.keys()) if id_to_solution else len(solutions)
+    max_id = max(id_to_solution.keys()) if id_to_solution else len(error_solutions)
     
     while True:
         try:
@@ -216,14 +253,14 @@ def select_solution(solutions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
             
             if choice.lower() == 'c':
                 # Prompt for custom solution
-                return prompt_custom_solution(solutions)
+                return prompt_custom_solution(error_solutions)
             
             choice_num = int(choice)
             if choice_num in id_to_solution:
                 return id_to_solution[choice_num]
-            elif 1 <= choice_num <= len(solutions):
+            elif 1 <= choice_num <= len(error_solutions):
                 # Fallback: use index if display_id not found
-                return solutions[choice_num - 1]
+                return error_solutions[choice_num - 1]
             else:
                 print(f"Please enter a number between 1 and {max_id}, 'c' for custom, or 'q' to quit")
         except ValueError:
@@ -384,25 +421,59 @@ def main():
             print("No solutions found in the analysis results.")
             return
         
-        # Display solutions
-        display_solutions(solutions)
+        # Group solutions by error
+        grouped = group_solutions_by_error(solutions)
         
-        # Select solution
-        if args.auto_select:
-            if 1 <= args.auto_select <= len(solutions):
-                selected = solutions[args.auto_select - 1]
+        # If only one error, skip error selection
+        if len(grouped) == 1:
+            error_key, error_solutions = list(grouped.items())[0]
+            display_solutions_for_error(error_solutions)
+            
+            # Select solution
+            if args.auto_select:
+                if 1 <= args.auto_select <= len(error_solutions):
+                    selected = error_solutions[args.auto_select - 1]
+                else:
+                    print(f"Error: Solution number {args.auto_select} is out of range (1-{len(error_solutions)})", file=sys.stderr)
+                    sys.exit(1)
             else:
-                print(f"Error: Solution number {args.auto_select} is out of range (1-{len(solutions)})", file=sys.stderr)
-                sys.exit(1)
+                selected = select_solution(error_solutions)
+            
+            if selected:
+                # Execute with kubectl-ai
+                success = execute_with_kubectl_ai(selected)
+                sys.exit(0 if success else 1)
+            else:
+                print("No solution selected. Exiting.")
         else:
-            selected = select_solution(solutions)
-        
-        if selected:
-            # Execute with kubectl-ai
-            success = execute_with_kubectl_ai(selected)
-            sys.exit(0 if success else 1)
-        else:
-            print("No solution selected. Exiting.")
+            # Multiple errors: first select error, then solution
+            display_errors(grouped)
+            
+            # Select error
+            error_selection = select_error(grouped)
+            if not error_selection:
+                print("No error selected. Exiting.")
+                return
+            
+            error_key, error_solutions = error_selection
+            display_solutions_for_error(error_solutions)
+            
+            # Select solution
+            if args.auto_select:
+                if 1 <= args.auto_select <= len(error_solutions):
+                    selected = error_solutions[args.auto_select - 1]
+                else:
+                    print(f"Error: Solution number {args.auto_select} is out of range (1-{len(error_solutions)})", file=sys.stderr)
+                    sys.exit(1)
+            else:
+                selected = select_solution(error_solutions)
+            
+            if selected:
+                # Execute with kubectl-ai
+                success = execute_with_kubectl_ai(selected)
+                sys.exit(0 if success else 1)
+            else:
+                print("No solution selected. Exiting.")
     else:
         # Without --explain: behave exactly like k8sgpt
         # First try to run normally (without forcing JSON)
@@ -442,22 +513,20 @@ def main():
             if data.get("status") != "OK" and data.get("problems", 0) > 0:
                 solutions = extract_solutions(data)
                 if solutions:
-                    # Group and display solutions
+                    # Group and display solutions by error
                     grouped = group_solutions_by_error(solutions)
                     print("\n" + "="*80)
                     print("SOLUTIONS SUMMARY")
                     print("="*80 + "\n")
                     
-                    solution_id = 1
                     for error_key, error_solutions in grouped.items():
                         first_sol = error_solutions[0]
                         print(f"Error: {first_sol['kind']}: {first_sol['name']}")
                         error_display = first_sol['error'][:150] + "..." if len(first_sol['error']) > 150 else first_sol['error']
                         print(f"  {error_display}")
                         print(f"\n  Solutions:")
-                        for sol in error_solutions:
-                            print(f"    [{solution_id}] {sol['solution']}")
-                            solution_id += 1
+                        for idx, sol in enumerate(error_solutions, 1):
+                            print(f"    [{idx}] {sol['solution']}")
                         print()
                     print("(Use --explain flag to interactively select and execute solutions)")
         
