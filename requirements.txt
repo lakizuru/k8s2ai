@@ -1,0 +1,8 @@
+# k8s2ai - CLI tool for Kubernetes issue analysis and resolution
+# This tool uses only Python standard library modules
+# No external dependencies required
+
+# If you want to add type checking or linting:
+# mypy>=1.0.0
+# pylint>=2.17.0
+
