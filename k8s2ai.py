@@ -527,6 +527,7 @@ def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
     """Execute the selected solution using kubectl-ai."""
     print(f"\n{colorize(f'{Emoji.ROCKET} Executing solution with kubectl-ai...', Colors.BOLD + Colors.GREEN)}")
     print(colorize("Solution:", Colors.BOLD) + " " + colorize(solution['solution'], Colors.WHITE))
+    print()  # Add blank line before kubectl-ai output
     
     # Construct the prompt for kubectl-ai
     prompt = f"Fix the following Kubernetes issue:\n\n"
@@ -536,71 +537,14 @@ def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
     prompt += f"Apply this solution: {solution['solution']}"
     
     try:
-        # Run kubectl-ai interactively and monitor output
-        # When kubectl-ai stops producing output (no more prompts/questions), exit automatically
-        process = subprocess.Popen(
+        # Run kubectl-ai with direct terminal output (no capture)
+        # This ensures all output is displayed in real-time
+        result = subprocess.run(
             ["kubectl", "ai", "--model", "gemini-2.5-flash", prompt],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1
+            text=True
         )
         
-        # Stream output and detect when it stops
-        last_output_time = time.time()
-        no_output_timeout = 3.0  # If no output for 3 seconds, consider it done
-        max_wait_time = 300  # Maximum 5 minutes total
-        start_time = time.time()
-        has_output = False
-        
-        def read_stream(stream, is_stderr=False):
-            """Read from stream and print output."""
-            nonlocal last_output_time, has_output
-            try:
-                for line in stream:
-                    has_output = True
-                    last_output_time = time.time()
-                    if is_stderr:
-                        print(line, end='', file=sys.stderr, flush=True)
-                    else:
-                        print(line, end='', flush=True)
-            except (ValueError, OSError):
-                pass  # Stream closed
-        
-        # Start threads to read both streams
-        stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, False), daemon=True)
-        stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, True), daemon=True)
-        
-        stdout_thread.start()
-        stderr_thread.start()
-        
-        # Monitor until process exits or no output timeout
-        while process.poll() is None:
-            # Check max wait time
-            if time.time() - start_time > max_wait_time:
-                process.terminate()
-                break
-            
-            # Check if no output for timeout period (kubectl-ai stopped prompting)
-            if has_output and (time.time() - last_output_time) > no_output_timeout:
-                # No output for a while - kubectl-ai is done (no more prompts)
-                process.terminate()
-                break
-            
-            time.sleep(0.1)  # Small sleep to avoid busy waiting
-        
-        # Wait for threads to finish
-        stdout_thread.join(timeout=1)
-        stderr_thread.join(timeout=1)
-        
-        # Wait for process to complete
-        try:
-            returncode = process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            returncode = process.wait()
-        
-        return returncode == 0
+        return result.returncode == 0
             
     except FileNotFoundError:
         print(colorize(f"{Emoji.CROSS} Error: kubectl-ai command not found.", Colors.BOLD + Colors.RED), file=sys.stderr)
