@@ -606,10 +606,26 @@ def init_setup():
     
     print()
     
-    # Prompt for Gemini API key
-    print(colorize(f"{Emoji.WRENCH} Setting up Gemini API...", Colors.BOLD))
+    # Prompt for Gemini model selection
+    print(colorize(f"\n{Emoji.WRENCH} Setting up Gemini API...", Colors.BOLD))
+    print(colorize(f"Available models:", Colors.CYAN))
+    print(colorize(f"  1. gemini-2.5-flash (faster, default)", Colors.WHITE))
+    print(colorize(f"  2. gemini-2.5-pro (more capable)", Colors.WHITE))
+    
     try:
-        gemini_api_key = input(colorize("Enter your Gemini API key: ", Colors.CYAN)).strip()
+        model_choice = input(colorize("\nSelect model (1/2) [1]: ", Colors.CYAN)).strip()
+        
+        if not model_choice or model_choice == "1":
+            gemini_model = "gemini-2.5-flash"
+        elif model_choice == "2":
+            gemini_model = "gemini-2.5-pro"
+        else:
+            print(colorize(f"{Emoji.CROSS} Invalid choice. Using default (gemini-2.5-flash).", Colors.YELLOW))
+            gemini_model = "gemini-2.5-flash"
+        
+        print(colorize(f"Selected model: {gemini_model}", Colors.GREEN))
+        
+        gemini_api_key = input(colorize("\nEnter your Gemini API key: ", Colors.CYAN)).strip()
         
         if not gemini_api_key:
             print(colorize(f"{Emoji.CROSS} No API key provided. Exiting.", Colors.RED))
@@ -691,9 +707,9 @@ def init_setup():
         # We don't check the return code because it's okay if no backend exists
         
         # Add auth backend
-        print(colorize(f"  Adding Google backend...", Colors.CYAN))
+        print(colorize(f"  Adding Google backend with {gemini_model}...", Colors.CYAN))
         result = subprocess.run(
-            ["k8sgpt", "auth", "add", "--backend", "google", "--model", "gemini-2.5-flash", "--password", gemini_api_key],
+            ["k8sgpt", "auth", "add", "--backend", "google", "--model", gemini_model, "--password", gemini_api_key],
             capture_output=True,
             text=True
         )
@@ -723,6 +739,7 @@ def init_setup():
             sys.exit(1)
         
         print(colorize(f"\n{Emoji.STAR} Initialization complete!", Colors.BOLD + Colors.GREEN))
+        print(colorize(f"Model: {gemini_model}", Colors.GREEN))
         print(colorize(f"\n{Emoji.INFO} Note: GEMINI_API_KEY has been set for this session.", Colors.YELLOW))
         print(colorize(f"To use it in other terminal sessions, either:", Colors.YELLOW))
         print(colorize(f"  1. Restart your terminal to load from {config_file}", Colors.DIM))
