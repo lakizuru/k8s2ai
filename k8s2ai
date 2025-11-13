@@ -294,36 +294,31 @@ def extract_solutions(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             solution_steps = []
             if "Solution:" in details:
                 solution_part = details.split("Solution:")[1].strip()
-                # Split by numbered steps (1., 2., 3., etc.)
-                # Match lines starting with a number followed by a dot and space
-                step_pattern = r'^(\d+)\.\s+(.+)$'
-                lines = solution_part.split('\n')
-                current_step = ""
                 
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
+                # Try to split by numbered patterns (handles both newline-separated and inline)
+                # Pattern matches: "1. text" or "2. text" etc.
+                step_pattern = r'(\d+)\.\s+'
+                
+                # Split by the numbered pattern
+                parts = re.split(step_pattern, solution_part)
+                
+                # Parts will be: ['', '1', 'text for step 1', '2', 'text for step 2', ...]
+                # Group them in pairs (number, text)
+                i = 1  # Skip the first empty string
+                while i < len(parts) - 1:
+                    step_num = parts[i]
+                    step_text = parts[i + 1].strip()
                     
-                    # Check if line matches the numbered step pattern
-                    match = re.match(step_pattern, line)
-                    if match:
-                        # Save previous step if exists
-                        if current_step:
-                            solution_steps.append(current_step.strip())
-                        # Start new step
-                        current_step = line
-                    else:
-                        # Continuation of current step
-                        if current_step:
-                            current_step += " " + line
-                        else:
-                            # First line without number, treat as step 1
-                            current_step = line
+                    if step_text:
+                        # Clean up extra whitespace and newlines
+                        step_text = ' '.join(step_text.split())
+                        solution_steps.append(step_text)
+                    
+                    i += 2
                 
-                # Add the last step
-                if current_step:
-                    solution_steps.append(current_step.strip())
+                # If no numbered steps were found, treat the whole solution as one step
+                if not solution_steps:
+                    solution_steps = [solution_part.strip()]
             else:
                 # If no structured solution, use the whole details as one solution
                 solution_steps = [details]
@@ -537,11 +532,22 @@ def execute_with_kubectl_ai(solution: Dict[str, Any]) -> bool:
     prompt += f"Apply this solution: {solution['solution']}"
     
     try:
+        # Get the current environment and ensure GEMINI_API_KEY is included
+        env = os.environ.copy()
+        
+        # Check if GEMINI_API_KEY is set
+        if "GEMINI_API_KEY" not in env:
+            print(colorize(f"{Emoji.CROSS} Error: GEMINI_API_KEY environment variable not set.", Colors.BOLD + Colors.RED), file=sys.stderr)
+            print(colorize("Please run:", Colors.YELLOW) + " " + colorize("k8s2ai init", Colors.BOLD + Colors.CYAN), file=sys.stderr)
+            print(colorize("Or set it manually:", Colors.YELLOW) + " " + colorize('export GEMINI_API_KEY="your-key"', Colors.BOLD + Colors.CYAN), file=sys.stderr)
+            return False
+        
         # Run kubectl-ai with direct terminal output (no capture)
         # This ensures all output is displayed in real-time
         result = subprocess.run(
             ["kubectl", "ai", "--model", "gemini-2.5-flash", prompt],
-            text=True
+            text=True,
+            env=env
         )
         
         return result.returncode == 0
@@ -626,6 +632,7 @@ def init_setup():
         
         # Add export to shell config file
         export_line = f'\nexport GEMINI_API_KEY="{gemini_api_key}"\n'
+        config_updated = False
         
         try:
             # Check if already exists
@@ -637,6 +644,12 @@ def init_setup():
                         update = input(colorize("  Update it? (y/N): ", Colors.CYAN)).strip().lower()
                         if update != 'y':
                             print(colorize("  Skipping update to config file.", Colors.YELLOW))
+                            # Ask if they want to continue with k8sgpt setup using the new key
+                            continue_setup = input(colorize("  Continue with k8sgpt setup using the new API key? (y/N): ", Colors.CYAN)).strip().lower()
+                            if continue_setup != 'y':
+                                print(colorize(f"\n{Emoji.INFO} Setup cancelled. No changes made.", Colors.YELLOW))
+                                return
+                            config_updated = True  # They want to use the new key even though file wasn't updated
                         else:
                             # Remove old lines and add new
                             lines = content.split('\n')
@@ -645,25 +658,42 @@ def init_setup():
                                 f.write('\n'.join(new_lines))
                                 f.write(export_line)
                             print(colorize(f"  {Emoji.CHECK} Updated {config_file}", Colors.GREEN))
+                            config_updated = True
                     else:
                         with open(config_file, 'a') as f:
                             f.write(export_line)
                         print(colorize(f"  {Emoji.CHECK} Added GEMINI_API_KEY to {config_file}", Colors.GREEN))
+                        config_updated = True
             else:
                 with open(config_file, 'w') as f:
                     f.write(export_line)
                 print(colorize(f"  {Emoji.CHECK} Created {config_file} with GEMINI_API_KEY", Colors.GREEN))
+                config_updated = True
         except Exception as e:
             print(colorize(f"  {Emoji.WARNING} Could not write to {config_file}: {e}", Colors.YELLOW))
             print(colorize(f"  Please manually add: export GEMINI_API_KEY=\"{gemini_api_key}\"", Colors.YELLOW))
+            # Ask if they want to continue anyway
+            continue_setup = input(colorize("  Continue with k8sgpt setup anyway? (y/N): ", Colors.CYAN)).strip().lower()
+            if continue_setup != 'y':
+                print(colorize(f"\n{Emoji.INFO} Setup cancelled.", Colors.YELLOW))
+                return
         
         # Configure k8sgpt auth
         print(colorize(f"\n{Emoji.WRENCH} Configuring k8sgpt authentication...", Colors.BOLD))
         
+        # Remove existing Google backend if present
+        print(colorize(f"  Removing existing Google backend (if any)...", Colors.CYAN))
+        subprocess.run(
+            ["k8sgpt", "auth", "remove", "--backends", "google"],
+            capture_output=True,
+            text=True
+        )
+        # We don't check the return code because it's okay if no backend exists
+        
         # Add auth backend
         print(colorize(f"  Adding Google backend...", Colors.CYAN))
         result = subprocess.run(
-            ["k8sgpt", "auth", "add", "--backend", "google", "--model", "gemini-pro", "--password", gemini_api_key],
+            ["k8sgpt", "auth", "add", "--backend", "google", "--model", "gemini-2.5-flash", "--password", gemini_api_key],
             capture_output=True,
             text=True
         )
@@ -693,9 +723,10 @@ def init_setup():
             sys.exit(1)
         
         print(colorize(f"\n{Emoji.STAR} Initialization complete!", Colors.BOLD + Colors.GREEN))
-        print(colorize(f"\nTo apply the environment variable in your current shell, run:", Colors.YELLOW))
-        print(colorize(f"  export GEMINI_API_KEY=\"{gemini_api_key}\"", Colors.BOLD + Colors.CYAN))
-        print(colorize(f"\nOr restart your terminal to load from {config_file}", Colors.YELLOW))
+        print(colorize(f"\n{Emoji.INFO} Note: GEMINI_API_KEY has been set for this session.", Colors.YELLOW))
+        print(colorize(f"To use it in other terminal sessions, either:", Colors.YELLOW))
+        print(colorize(f"  1. Restart your terminal to load from {config_file}", Colors.DIM))
+        print(colorize(f"  2. Or run: source {config_file}", Colors.DIM))
         
     except KeyboardInterrupt:
         print(colorize(f"\n{Emoji.CROSS} Initialization cancelled.", Colors.YELLOW))
