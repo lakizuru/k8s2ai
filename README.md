@@ -39,12 +39,48 @@ cd k8s2ai
 
 ### 2. Make executable
 ```bash
-chmod +x k8s2ai.py
+chmod +x k8s2ai
 ```
 
-### 3. Initialize and configure
+### 3. Add to PATH (Choose one method)
+
+#### Option A: Symlink to /usr/local/bin (Recommended)
 ```bash
-python3 k8s2ai.py init
+sudo ln -s "$(pwd)/k8s2ai" /usr/local/bin/k8s2ai
+```
+
+#### Option B: Add to PATH in shell config
+```bash
+# For zsh (add to ~/.zshrc)
+echo 'export PATH="$HOME/GitHub/k8s2ai:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+# For bash (add to ~/.bashrc)
+echo 'export PATH="$HOME/GitHub/k8s2ai:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+#### Option C: Create an alias
+```bash
+# For zsh (add to ~/.zshrc)
+echo 'alias k8s2ai="$HOME/GitHub/k8s2ai/k8s2ai"' >> ~/.zshrc
+source ~/.zshrc
+
+# For bash (add to ~/.bashrc)
+echo 'alias k8s2ai="$HOME/GitHub/k8s2ai/k8s2ai"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+**Note:** Replace `$HOME/GitHub/k8s2ai` with the actual path where you cloned the repository.
+
+### 4. Verify installation
+```bash
+k8s2ai --help
+```
+
+### 5. Initialize and configure
+```bash
+k8s2ai init
 ```
 
 The `init` command will:
@@ -54,18 +90,12 @@ The `init` command will:
 - ✓ Configure `k8sgpt` with Google/Gemini backend
 - ✓ Set Gemini as the default AI provider
 
-### 4. (Optional) Create an alias
-```bash
-# Add to your ~/.zshrc or ~/.bashrc
-alias k8s2ai='python3 /path/to/k8s2ai.py'
-```
-
 ## Usage
 
 ### Initialize (First Time Setup)
 
 ```bash
-python3 k8s2ai.py init
+k8s2ai init
 ```
 
 Run this command first to set up your environment with the Gemini API key and configure k8sgpt.
@@ -76,17 +106,17 @@ Run this command first to set up your environment with the Gemini API key and co
 
 ```bash
 # Basic analysis (same as k8sgpt analyze)
-python3 k8s2ai.py analyze
+k8s2ai analyze
 
 # Filter by resource type
-python3 k8s2ai.py analyze -f Pod
-python3 k8s2ai.py analyze --filter Deployment,Service
+k8s2ai analyze -f Pod
+k8s2ai analyze --filter Deployment,Service
 
 # Specify namespace
-python3 k8s2ai.py analyze --namespace kube-system
+k8s2ai analyze --namespace kube-system
 
 # Get JSON output
-python3 k8s2ai.py analyze --output json
+k8s2ai analyze --output json
 ```
 
 ### Interactive Mode with Solutions
@@ -95,14 +125,14 @@ Use the `--explain` flag to get AI-generated solutions and execute them interact
 
 ```bash
 # Interactive solution selection
-python3 k8s2ai.py analyze --explain
+k8s2ai analyze --explain
 
 # With filters
-python3 k8s2ai.py analyze --explain -f Pod
-python3 k8s2ai.py analyze --explain --namespace default
+k8s2ai analyze --explain -f Pod
+k8s2ai analyze --explain --namespace default
 
 # Auto-select solution #1 (no prompts)
-python3 k8s2ai.py analyze --explain --auto-select 1
+k8s2ai analyze --explain --auto-select 1
 ```
 
 ### Workflow with --explain
@@ -129,7 +159,7 @@ Initialize the tool by checking dependencies and configuring API keys.
 
 **Example:**
 ```bash
-python3 k8s2ai.py init
+k8s2ai init
 ```
 
 ### k8s2ai analyze
@@ -145,16 +175,16 @@ Analyze your Kubernetes cluster for issues (passes through to k8sgpt).
 **Examples:**
 ```bash
 # Basic analysis
-python3 k8s2ai.py analyze
+k8s2ai analyze
 
 # Interactive with solutions
-python3 k8s2ai.py analyze --explain
+k8s2ai analyze --explain
 
 # Filter specific resources
-python3 k8s2ai.py analyze --explain -f Pod,Deployment
+k8s2ai analyze --explain -f Pod,Deployment
 
 # Auto-execute first solution
-python3 k8s2ai.py analyze --explain --auto-select 1
+k8s2ai analyze --explain --auto-select 1
 ```
 
 ### Custom Solutions
@@ -176,7 +206,7 @@ The custom solution will be sent to kubectl-ai for execution.
 
 ### Without --explain (Standard Mode)
 ```
-$ python3 k8s2ai.py analyze -f Pod
+$ k8s2ai analyze -f Pod
 
 0 default/nginx-pod(Deployment/nginx-pod)
 - Error: ImagePullBackOff: Back-off pulling image "nginx:invalid-tag"
@@ -198,7 +228,7 @@ Error: Pod: default/nginx-pod
 
 ### With --explain (Interactive Mode)
 ```
-$ python3 k8s2ai.py analyze --explain -f Pod
+$ k8s2ai analyze --explain -f Pod
 
 ================================================================================
 🐛 DETECTED ISSUES
@@ -243,7 +273,7 @@ Solution: Check if the image name and tag are correct (busybox:latest)
 
 ### Initialization
 ```
-$ python3 k8s2ai.py init
+$ k8s2ai init
 
 🚀 k8s2ai Initialization
 ================================================================================
@@ -259,6 +289,7 @@ Enter your Gemini API key: AIza****************************
   ✓ Added GEMINI_API_KEY to /Users/username/.zshrc
 
 🔧 Configuring k8sgpt authentication...
+  Removing existing Google backend (if any)...
   Adding Google backend...
   ✓ Google backend added successfully
   Setting Google as default provider...
@@ -266,10 +297,10 @@ Enter your Gemini API key: AIza****************************
 
 ⭐ Initialization complete!
 
-To apply the environment variable in your current shell, run:
-  export GEMINI_API_KEY="AIza****************************"
-
-Or restart your terminal to load from /Users/username/.zshrc
+ℹ Note: GEMINI_API_KEY has been set for this session.
+To use it in other terminal sessions, either:
+  1. Restart your terminal to load from /Users/username/.zshrc
+  2. Or run: source /Users/username/.zshrc
 ```
 
 ## How It Works
@@ -446,20 +477,20 @@ chmod 644 ~/.zshrc
 Set the `NO_COLOR` environment variable:
 ```bash
 export NO_COLOR=1
-python3 k8s2ai.py analyze --explain
+k8s2ai analyze --explain
 ```
 
 ### Use with Different AI Models
 
-k8s2ai uses `gemini-2.5-flash` for kubectl-ai by default. The k8sgpt backend is configured during `init` to use `gemini-pro`.
+k8s2ai uses `gemini-2.5-flash` for both k8sgpt and kubectl-ai by default.
 
-To use different models, modify the script or configure k8sgpt manually:
+To use different models, modify the configuration:
 ```bash
-# For k8sgpt
+# For k8sgpt - during init or manually
 k8sgpt auth add --backend google --model gemini-1.5-pro --password "YOUR_API_KEY"
 
-# For kubectl-ai (modify the script)
-# Change "gemini-2.5-flash" to your preferred model in execute_with_kubectl_ai()
+# For kubectl-ai - modify the script or set environment variable
+export KUBECTL_AI_MODEL="gemini-1.5-pro"
 ```
 
 ### Automation
@@ -467,14 +498,29 @@ k8sgpt auth add --backend google --model gemini-1.5-pro --password "YOUR_API_KEY
 Use `--auto-select` for automated workflows:
 ```bash
 # Always select the first solution
-python3 k8s2ai.py analyze --explain --auto-select 1
+k8s2ai analyze --explain --auto-select 1
 
 # In scripts
-if python3 k8s2ai.py analyze --explain --auto-select 1; then
+if k8s2ai analyze --explain --auto-select 1; then
     echo "Issue resolved successfully"
 else
     echo "Failed to resolve issue"
 fi
+```
+
+### Running Without Adding to PATH
+
+If you prefer not to add k8s2ai to your PATH:
+```bash
+# Run directly from the cloned directory
+cd /path/to/k8s2ai
+./k8s2ai analyze --explain
+
+# Or use the full path
+/path/to/k8s2ai/k8s2ai analyze --explain
+
+# Or create a one-time alias
+alias k8s2ai='/path/to/k8s2ai/k8s2ai'
 ```
 
 ## Configuration
